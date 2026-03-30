@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ByeText Article Demo</title>
+    <link rel="stylesheet" href="./demo.css" />
+  </head>
+  <body>
+    <article class="paper" id="paper" aria-label="Resizable ByeText article demo">
+      <div class="content" id="content">
+        <canvas id="text-layer"></canvas>
+        <canvas id="overlay-layer"></canvas>
+      </div>
+      <button class="resize-handle" id="resize-handle" aria-label="Resize article">
+        <svg viewBox="0 0 40 40" aria-hidden="true">
+          <path d="M35 13c-7 0-12 5-12 12" />
+          <path d="M35 22c-4 0-7 3-7 7" />
+        </svg>
+      </button>
+    </article>
+
+    <script type="module" src="./demo.js"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "byetext-monorepo",
+  "description": "Canvas-first text runtime monorepo for incremental layout, obstacle-aware reflow, and plugin-driven rendering.",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "demo": "node examples/obstacle/server.mjs",
+    "test": "pnpm --filter @byetext/core test",
+    "test:core": "pnpm --filter @byetext/core test",
+    "bench": "node --experimental-strip-types benchmarks/runner.ts"
+  }
+}

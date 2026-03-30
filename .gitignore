@@ -1,0 +1,10 @@
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
