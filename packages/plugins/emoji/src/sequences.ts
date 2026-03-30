@@ -1,3 +1,9 @@
+import { isEmojiSequence as isEmojiCluster, segmentGraphemes } from '../../../core/src/unicode.ts'
+
 export function isEmojiSequence(text: string): boolean {
-  return /\p{Extended_Pictographic}/u.test(text)
+  return isEmojiCluster(text)
+}
+
+export function findEmojiSequences(text: string): string[] {
+  return segmentGraphemes(text).filter(isEmojiCluster)
 }

@@ -90,8 +90,10 @@ export interface LayoutLine {
   height: number
   baseline: number
   width: number
+  signature: string
   charStart: number
   charEnd: number
+  charShift: number
   runSpans: RunSpan[]
   segments: LayoutLineSegment[]
   xOffset: number
@@ -106,6 +108,7 @@ export interface LineMetrics {
   height: number
   baseline: number
   width: number
+  signature: string
   charStart: number
   charEnd: number
   runSpans: RunSpan[]
@@ -178,6 +181,7 @@ export interface CanvasContextLike {
   canvas?: { width: number; height: number }
   font: string
   fillStyle: string | CanvasGradient | CanvasPattern
+  direction?: 'inherit' | 'ltr' | 'rtl'
   globalAlpha?: number
   measureText(text: string): CanvasMeasureResult
   fillText(text: string, x: number, y: number): void
@@ -336,6 +340,7 @@ export interface LinePoolLike {
 
 export interface DocumentState {
   runs: MutableRun[]
+  runLookup: Map<RunId, MutableRun>
   lineCache: LineCache
   measureCache: MeasureCache
   dirtyRange: DirtyRange | null

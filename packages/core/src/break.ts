@@ -1,4 +1,3 @@
-import { cloneLine } from './types.ts'
 import type {
   LayoutConstraint,
   LayoutLine,
@@ -8,6 +7,11 @@ import type {
   MutableRun,
   RunSpan
 } from './types.ts'
+
+export interface LineBreakResult {
+  line: LayoutLine
+  nextTokenStart: number
+}
 
 export function buildPrefixSums(widths: ArrayLike<number>): Float64Array {
   const prefix = new Float64Array(widths.length + 1)
@@ -142,6 +146,15 @@ function createLineXPrefix(segments: LayoutLineSegment[]): Float64Array {
   return new Float64Array(values)
 }
 
+function lineSignature(tokens: LayoutToken[], segments: LayoutLineSegment[]): string {
+  return segments
+    .map((segment) => tokens
+      .slice(segment.tokenStart, segment.tokenEnd)
+      .map((token) => `${token.kind}:${token.text}`)
+      .join(''))
+    .join('\u0000')
+}
+
 function lineHeight(tokens: LayoutToken[], tokenStart: number, tokenEnd: number, defaultHeight: number): { ascent: number; descent: number; lineHeight: number } {
   let ascent = 0
   let descent = 0
@@ -232,6 +245,185 @@ function findTokenIndexForChar(tokens: LayoutToken[], charIndex: number): number
   return Math.min(tokens.length, lo)
 }
 
+export function breakLine(
+  tokens: LayoutToken[],
+  prefixSums: Float64Array,
+  layoutWidth: number,
+  tokenStart: number,
+  lineIndex: number,
+  y: number,
+  defaultLineHeight: number,
+  constraintForLine?: (lineIndex: number, y: number, estimatedHeight: number) => LayoutConstraint | null
+): LineBreakResult | null {
+  if (tokenStart >= tokens.length) {
+    return null
+  }
+
+  const firstToken = tokens[tokenStart]
+  const lineConstraint = constraintForLine?.(lineIndex, y, defaultLineHeight) ?? { xOffset: 0, maxWidth: layoutWidth }
+  const segments = normalizeConstraintSegments(layoutWidth, lineConstraint)
+
+  if (firstToken?.kind === 'newline') {
+    return {
+      line: {
+        index: lineIndex,
+        y,
+        height: defaultLineHeight,
+        baseline: defaultLineHeight * 0.8,
+        width: 0,
+        signature: '',
+        charStart: firstToken.charStart,
+        charEnd: firstToken.charEnd,
+        charShift: 0,
+        runSpans: [],
+        segments: [],
+        xOffset: segments[0]?.xOffset ?? 0,
+        tokenStart,
+        tokenEnd: tokenStart,
+        xPrefix: new Float64Array([segments[0]?.xOffset ?? 0])
+      },
+      nextTokenStart: tokenStart + 1
+    }
+  }
+
+  let tokenCursor = tokenStart
+  let encounteredNewline = false
+  const lineSegments: LayoutLineSegment[] = []
+
+  for (const segment of segments) {
+    tokenCursor = skipLeadingSpaces(tokens, tokenCursor)
+    if (tokenCursor >= tokens.length) {
+      break
+    }
+
+    if (tokens[tokenCursor]?.kind === 'newline') {
+      encounteredNewline = true
+      tokenCursor += 1
+      break
+    }
+
+    let candidateEnd = fitLine(prefixSums, tokenCursor, segment.maxWidth)
+    if (candidateEnd <= tokenCursor) {
+      candidateEnd = tokenCursor + 1
+    }
+
+    let newlineIndex = -1
+    for (let tokenIndex = tokenCursor; tokenIndex < candidateEnd; tokenIndex += 1) {
+      if (tokens[tokenIndex]?.kind === 'newline') {
+        newlineIndex = tokenIndex
+        break
+      }
+    }
+
+    let segmentEnd = newlineIndex >= 0 ? newlineIndex : findBreakBefore(tokens, candidateEnd, tokenCursor)
+    if (segmentEnd <= tokenCursor) {
+      segmentEnd = Math.min(tokens.length, tokenCursor + 1)
+    }
+
+    segmentEnd = trimTrailingSpaces(tokens, tokenCursor, segmentEnd)
+    if (segmentEnd <= tokenCursor) {
+      continue
+    }
+
+    const spans = createRunSpans(tokens, tokenCursor, segmentEnd, segment.xOffset)
+    if (spans.runSpans.length === 0) {
+      continue
+    }
+
+    lineSegments.push({
+      xOffset: segment.xOffset,
+      maxWidth: segment.maxWidth,
+      width: spans.width,
+      tokenStart: tokenCursor,
+      tokenEnd: segmentEnd,
+      runSpans: spans.runSpans,
+      xPrefix: spans.xPrefix
+    })
+
+    tokenCursor = segmentEnd
+
+    if (newlineIndex >= 0) {
+      encounteredNewline = true
+      tokenCursor = newlineIndex + 1
+      break
+    }
+  }
+
+  if (lineSegments.length === 0) {
+    tokenCursor = skipLeadingSpaces(tokens, tokenCursor)
+    if (tokenCursor >= tokens.length) {
+      return null
+    }
+
+    if (tokens[tokenCursor]?.kind === 'newline') {
+      return {
+        line: {
+          index: lineIndex,
+          y,
+          height: defaultLineHeight,
+          baseline: defaultLineHeight * 0.8,
+          width: 0,
+          signature: '',
+          charStart: tokens[tokenCursor]?.charStart ?? firstToken?.charStart ?? 0,
+          charEnd: tokens[tokenCursor]?.charEnd ?? firstToken?.charStart ?? 0,
+          charShift: 0,
+          runSpans: [],
+          segments: [],
+          xOffset: segments[0]?.xOffset ?? 0,
+          tokenStart: tokenCursor,
+          tokenEnd: tokenCursor,
+          xPrefix: new Float64Array([segments[0]?.xOffset ?? 0])
+        },
+        nextTokenStart: tokenCursor + 1
+      }
+    }
+
+    const fallbackSegment = segments.reduce((widest, current) => current.maxWidth > widest.maxWidth ? current : widest, segments[0]!)
+    const forcedEnd = Math.min(tokens.length, tokenCursor + 1)
+    const spans = createRunSpans(tokens, tokenCursor, forcedEnd, fallbackSegment.xOffset)
+    lineSegments.push({
+      xOffset: fallbackSegment.xOffset,
+      maxWidth: fallbackSegment.maxWidth,
+      width: spans.width,
+      tokenStart: tokenCursor,
+      tokenEnd: forcedEnd,
+      runSpans: spans.runSpans,
+      xPrefix: spans.xPrefix
+    })
+    tokenCursor = forcedEnd
+  }
+
+  const firstSegment = lineSegments[0]
+  const lastSegment = lineSegments[lineSegments.length - 1]
+  const metrics = lineHeight(tokens, firstSegment.tokenStart, lastSegment.tokenEnd, defaultLineHeight)
+  const flattenedSpans = lineSegments.flatMap((segment) => segment.runSpans)
+  const charStartIndex = flattenedSpans[0]?.charStart ?? firstToken?.charStart ?? 0
+  const charEndIndex = flattenedSpans[flattenedSpans.length - 1]?.charEnd ?? charStartIndex
+  const rightMost = lineSegments.reduce((max, segment) => Math.max(max, segment.xOffset + segment.width), 0)
+  const leftMost = firstSegment.xOffset
+
+  return {
+    line: {
+      index: lineIndex,
+      y,
+      height: metrics.lineHeight,
+      baseline: metrics.ascent,
+      width: Math.max(0, rightMost - leftMost),
+      signature: lineSignature(tokens, lineSegments),
+      charStart: charStartIndex,
+      charEnd: charEndIndex,
+      charShift: 0,
+      runSpans: flattenedSpans,
+      segments: lineSegments,
+      xOffset: leftMost,
+      tokenStart: firstSegment.tokenStart,
+      tokenEnd: lastSegment.tokenEnd,
+      xPrefix: createLineXPrefix(lineSegments)
+    },
+    nextTokenStart: encounteredNewline ? tokenCursor : tokenCursor
+  }
+}
+
 export function breakDocument(
   tokens: LayoutToken[],
   prefixSums: Float64Array,
@@ -250,8 +442,10 @@ export function breakDocument(
         height: defaultLineHeight,
         baseline: defaultLineHeight * 0.8,
         width: 0,
+        signature: '',
         charStart: startChar,
         charEnd: startChar,
+        charShift: 0,
         runSpans: [],
         segments: [],
         xOffset: 0,
@@ -268,171 +462,16 @@ export function breakDocument(
   let tokenStart = findTokenIndexForChar(tokens, startChar)
 
   while (tokenStart < tokens.length) {
-    const firstToken = tokens[tokenStart]
-    const lineConstraint = constraintForLine?.(lineIndex, y, defaultLineHeight) ?? { xOffset: 0, maxWidth: layoutWidth }
-    const segments = normalizeConstraintSegments(layoutWidth, lineConstraint)
-
-    if (firstToken?.kind === 'newline') {
-      lines.push({
-        index: lineIndex,
-        y,
-        height: defaultLineHeight,
-        baseline: defaultLineHeight * 0.8,
-        width: 0,
-        charStart: firstToken.charStart,
-        charEnd: firstToken.charEnd,
-        runSpans: [],
-        segments: [],
-        xOffset: segments[0]?.xOffset ?? 0,
-        tokenStart,
-        tokenEnd: tokenStart,
-        xPrefix: new Float64Array([segments[0]?.xOffset ?? 0])
-      })
-      tokenStart += 1
-      lineIndex += 1
-      y += defaultLineHeight
-      continue
+    const result = breakLine(tokens, prefixSums, layoutWidth, tokenStart, lineIndex, y, defaultLineHeight, constraintForLine)
+    if (!result) {
+      break
     }
 
-    let tokenCursor = tokenStart
-    let encounteredNewline = false
-    const lineSegments: LayoutLineSegment[] = []
-
-    for (const segment of segments) {
-      tokenCursor = skipLeadingSpaces(tokens, tokenCursor)
-      if (tokenCursor >= tokens.length) {
-        break
-      }
-
-      if (tokens[tokenCursor]?.kind === 'newline') {
-        encounteredNewline = true
-        tokenCursor += 1
-        break
-      }
-
-      let candidateEnd = fitLine(prefixSums, tokenCursor, segment.maxWidth)
-      if (candidateEnd <= tokenCursor) {
-        candidateEnd = tokenCursor + 1
-      }
-
-      let newlineIndex = -1
-      for (let tokenIndex = tokenCursor; tokenIndex < candidateEnd; tokenIndex += 1) {
-        if (tokens[tokenIndex]?.kind === 'newline') {
-          newlineIndex = tokenIndex
-          break
-        }
-      }
-
-      let segmentEnd = newlineIndex >= 0 ? newlineIndex : findBreakBefore(tokens, candidateEnd, tokenCursor)
-      if (segmentEnd <= tokenCursor) {
-        segmentEnd = Math.min(tokens.length, tokenCursor + 1)
-      }
-
-      segmentEnd = trimTrailingSpaces(tokens, tokenCursor, segmentEnd)
-      if (segmentEnd <= tokenCursor) {
-        continue
-      }
-
-      const spans = createRunSpans(tokens, tokenCursor, segmentEnd, segment.xOffset)
-      if (spans.runSpans.length === 0) {
-        continue
-      }
-
-      lineSegments.push({
-        xOffset: segment.xOffset,
-        maxWidth: segment.maxWidth,
-        width: spans.width,
-        tokenStart: tokenCursor,
-        tokenEnd: segmentEnd,
-        runSpans: spans.runSpans,
-        xPrefix: spans.xPrefix
-      })
-
-      tokenCursor = segmentEnd
-
-      if (newlineIndex >= 0) {
-        encounteredNewline = true
-        tokenCursor = newlineIndex + 1
-        break
-      }
-    }
-
-    if (lineSegments.length === 0) {
-      tokenCursor = skipLeadingSpaces(tokens, tokenCursor)
-      if (tokenCursor >= tokens.length) {
-        break
-      }
-
-      if (tokens[tokenCursor]?.kind === 'newline') {
-        lines.push({
-          index: lineIndex,
-          y,
-          height: defaultLineHeight,
-          baseline: defaultLineHeight * 0.8,
-          width: 0,
-          charStart: tokens[tokenCursor]?.charStart ?? startChar,
-          charEnd: tokens[tokenCursor]?.charEnd ?? startChar,
-          runSpans: [],
-          segments: [],
-          xOffset: segments[0]?.xOffset ?? 0,
-          tokenStart: tokenCursor,
-          tokenEnd: tokenCursor,
-          xPrefix: new Float64Array([segments[0]?.xOffset ?? 0])
-        })
-        tokenStart = tokenCursor + 1
-        lineIndex += 1
-        y += defaultLineHeight
-        continue
-      }
-
-      const fallbackSegment = segments.reduce((widest, current) => current.maxWidth > widest.maxWidth ? current : widest, segments[0]!)
-      const forcedEnd = Math.min(tokens.length, tokenCursor + 1)
-      const spans = createRunSpans(tokens, tokenCursor, forcedEnd, fallbackSegment.xOffset)
-      lineSegments.push({
-        xOffset: fallbackSegment.xOffset,
-        maxWidth: fallbackSegment.maxWidth,
-        width: spans.width,
-        tokenStart: tokenCursor,
-        tokenEnd: forcedEnd,
-        runSpans: spans.runSpans,
-        xPrefix: spans.xPrefix
-      })
-      tokenCursor = forcedEnd
-    }
-
-    const firstSegment = lineSegments[0]
-    const lastSegment = lineSegments[lineSegments.length - 1]
-    const metrics = lineHeight(tokens, firstSegment.tokenStart, lastSegment.tokenEnd, defaultLineHeight)
-    const flattenedSpans = lineSegments.flatMap((segment) => segment.runSpans)
-    const charStartIndex = flattenedSpans[0]?.charStart ?? firstToken?.charStart ?? startChar
-    const charEndIndex = flattenedSpans[flattenedSpans.length - 1]?.charEnd ?? charStartIndex
-    const rightMost = lineSegments.reduce((max, segment) => Math.max(max, segment.xOffset + segment.width), 0)
-    const leftMost = firstSegment.xOffset
-
-    lines.push({
-      index: lineIndex,
-      y,
-      height: metrics.lineHeight,
-      baseline: metrics.ascent,
-      width: Math.max(0, rightMost - leftMost),
-      charStart: charStartIndex,
-      charEnd: charEndIndex,
-      runSpans: flattenedSpans,
-      segments: lineSegments,
-      xOffset: leftMost,
-      tokenStart: firstSegment.tokenStart,
-      tokenEnd: lastSegment.tokenEnd,
-      xPrefix: createLineXPrefix(lineSegments)
-    })
-
-    y += metrics.lineHeight
+    lines.push(result.line)
+    tokenStart = result.nextTokenStart
     lineIndex += 1
-    tokenStart = tokenCursor
-
-    if (encounteredNewline) {
-      tokenStart = tokenCursor
-    }
+    y = result.line.y + result.line.height
   }
 
-  return lines.map(cloneLine)
+  return lines
 }

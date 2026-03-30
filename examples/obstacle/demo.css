@@ -57,9 +57,59 @@ body {
   pointer-events: none;
 }
 
+.hud {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  z-index: 2;
+  display: grid;
+  gap: 6px;
+  min-width: 280px;
+  padding: 12px 14px;
+  border: 1px solid rgba(17, 17, 17, 0.09);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 14px 28px rgba(17, 17, 17, 0.06);
+  backdrop-filter: blur(16px);
+}
+
+.hud strong,
+.hud span {
+  color: var(--ink);
+  font: 500 12px/1.2 "IBM Plex Sans", "Segoe UI", sans-serif;
+  letter-spacing: 0.01em;
+}
+
+.hud span {
+  color: rgba(17, 17, 17, 0.62);
+}
+
+.hud-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hud kbd {
+  min-width: 28px;
+  padding: 5px 8px;
+  border: 1px solid rgba(17, 17, 17, 0.1);
+  border-radius: 999px;
+  background: rgba(17, 17, 17, 0.04);
+  color: rgba(17, 17, 17, 0.68);
+  font: 500 11px/1 "IBM Plex Sans", "Segoe UI", sans-serif;
+  text-align: center;
+}
+
+.hud kbd.active {
+  border-color: rgba(17, 17, 17, 0.2);
+  background: #111111;
+  color: #ffffff;
+}
+
 .content {
   position: absolute;
-  inset: 34px 34px 42px 34px;
+  inset: 92px 34px 42px 34px;
   overflow: hidden;
 }
 
@@ -137,6 +187,13 @@ canvas {
   }
 
   .content {
-    inset: 24px 24px 34px 24px;
+    inset: 78px 24px 34px 24px;
+  }
+
+  .hud {
+    top: 12px;
+    left: 12px;
+    min-width: 0;
+    max-width: calc(100% - 24px);
   }
 }

@@ -1,7 +1,7 @@
-import { buildPrefixSums, breakDocument, flattenRunsToTokens } from './break.ts'
+import { breakDocument, breakLine, buildPrefixSums, flattenRunsToTokens } from './break.ts'
 import { beginMeasurementPass, finishMeasurementPass, measureRun, measureTextFragment } from './measure.ts'
 import { buildDirtyRegionsForLines } from './render.ts'
-import { clamp, EMPTY_LAYOUT, totalTextLength } from './types.ts'
+import { clamp, cloneLine, EMPTY_LAYOUT, totalTextLength } from './types.ts'
 import type {
   CharPosition,
   InternalTextDocument,
@@ -11,19 +11,6 @@ import type {
   MutableRun,
   RunStyle
 } from './types.ts'
-
-function cloneLine(line: LayoutLine): LayoutLine {
-  return {
-    ...line,
-    runSpans: line.runSpans.map((span) => ({ ...span })),
-    segments: line.segments.map((segment) => ({
-      ...segment,
-      runSpans: segment.runSpans.map((span) => ({ ...span })),
-      xPrefix: new Float64Array(segment.xPrefix)
-    })),
-    xPrefix: new Float64Array(line.xPrefix)
-  }
-}
 
 function buildLayoutState(lines: LayoutLine[], version: number): LayoutState {
   const lineStarts = new Int32Array(lines.length)
@@ -103,7 +90,22 @@ function findLineIndexForY(lines: LayoutLine[], yPrefix: Float64Array, y: number
   return clamp(lo, 0, Math.max(0, lines.length - 1))
 }
 
-function shiftedTail(lines: LayoutLine[], fromIndex: number, deltaY: number, startIndex: number): LayoutLine[] {
+function spanStart(line: LayoutLine, span: LayoutLine['runSpans'][number]): number {
+  return span.charStart + (line.charShift ?? 0)
+}
+
+function spanEnd(line: LayoutLine, span: LayoutLine['runSpans'][number]): number {
+  return span.charEnd + (line.charShift ?? 0)
+}
+
+function shiftedTailWithDelta(
+  lines: LayoutLine[],
+  fromIndex: number,
+  deltaY: number,
+  startIndex: number,
+  charDelta: number,
+  tokenDelta: number
+): LayoutLine[] {
   const tail: LayoutLine[] = []
   for (let index = fromIndex; index < lines.length; index += 1) {
     const line = lines[index]
@@ -111,13 +113,69 @@ function shiftedTail(lines: LayoutLine[], fromIndex: number, deltaY: number, sta
       continue
     }
 
-    const copy = cloneLine(line)
-    copy.index = startIndex + tail.length
-    copy.y += deltaY
+    const copy: LayoutLine = {
+      ...line,
+      index: startIndex + tail.length,
+      y: line.y + deltaY,
+      charStart: line.charStart + charDelta,
+      charEnd: line.charEnd + charDelta,
+      charShift: (line.charShift ?? 0) + charDelta,
+      tokenStart: line.tokenStart + tokenDelta,
+      tokenEnd: line.tokenEnd + tokenDelta,
+      segments: line.segments.map((segment) => ({
+        ...segment,
+        tokenStart: segment.tokenStart + tokenDelta,
+        tokenEnd: segment.tokenEnd + tokenDelta
+      }))
+    }
     tail.push(copy)
   }
 
   return tail
+}
+
+function lineShapeEqual(next: LayoutLine, previous: LayoutLine): boolean {
+  if (
+    next.signature !== previous.signature ||
+    next.width !== previous.width ||
+    next.height !== previous.height ||
+    next.xOffset !== previous.xOffset ||
+    next.runSpans.length !== previous.runSpans.length ||
+    next.segments.length !== previous.segments.length
+  ) {
+    return false
+  }
+
+  for (let index = 0; index < next.runSpans.length; index += 1) {
+    const left = next.runSpans[index]
+    const right = previous.runSpans[index]
+    if (left?.x !== right?.x || left?.width !== right?.width) {
+      return false
+    }
+  }
+
+  for (let index = 0; index < next.segments.length; index += 1) {
+    const left = next.segments[index]
+    const right = previous.segments[index]
+    if (
+      left?.xOffset !== right?.xOffset ||
+      left?.maxWidth !== right?.maxWidth ||
+      left?.width !== right?.width ||
+      left?.runSpans.length !== right?.runSpans.length
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function canReuseTail(next: LayoutLine, previous: LayoutLine, charDelta: number): boolean {
+  return (
+    next.charStart === previous.charStart + charDelta &&
+    next.charEnd === previous.charEnd + charDelta &&
+    lineShapeEqual(next, previous)
+  )
 }
 
 function incrementalRelayout(doc: InternalTextDocument, tokens: LayoutToken[], prefixSums: Float64Array): LayoutLine[] | null {
@@ -129,81 +187,43 @@ function incrementalRelayout(doc: InternalTextDocument, tokens: LayoutToken[], p
     return null
   }
 
-  const totalChars = Math.max(1, totalTextLength(state.runs))
-  if (dirty.reason === 'width-change' || (dirty.charEnd - dirty.charStart) / totalChars > 0.3) {
-    return null
-  }
-
-  const firstLineIndex = findLineIndexForChar(previous, dirty.charStart)
+  const firstLineIndex = dirty.reason === 'width-change' ? 0 : findLineIndexForChar(previous, dirty.charStart)
   const firstLine = previous[firstLineIndex]
   if (!firstLine) {
     return null
   }
 
-  const head = previous.slice(0, firstLineIndex).map(cloneLine)
-  const yOffset = head.length > 0 ? (head[head.length - 1]?.y ?? 0) + (head[head.length - 1]?.height ?? 0) : 0
-  const relaid = breakDocument(
-    tokens,
-    prefixSums,
-    state.layoutWidth,
-    firstLine.charStart,
-    firstLineIndex,
-    yOffset,
-    defaultLineHeight(state.runs),
-    (lineIndex, y, height) => state.plugins.runObstacle(lineIndex, y, height, state.layoutWidth)
-  )
+  const head = previous.slice(0, firstLineIndex)
+  const oldTotalChars = previous[previous.length - 1]?.charEnd ?? 0
+  const charDelta = totalTextLength(state.runs) - oldTotalChars
+  const defaultHeight = defaultLineHeight(state.runs)
+  const constraintForLine = (lineIndex: number, y: number, height: number) => state.plugins.runObstacle(lineIndex, y, height, state.layoutWidth)
+  const relaid: LayoutLine[] = []
+  let lineIndex = firstLineIndex
+  let y = head.length > 0 ? (head[head.length - 1]?.y ?? 0) + (head[head.length - 1]?.height ?? 0) : 0
+  let tokenStart = firstLine.tokenStart
 
-  let stableOldIndex = -1
-  let stableNewIndex = -1
-  let searchFrom = firstLineIndex
-
-  for (let newIndex = 0; newIndex < relaid.length; newIndex += 1) {
-    const nextLine = relaid[newIndex]
-    if (!nextLine) {
-      continue
-    }
-
-    for (let oldIndex = searchFrom; oldIndex < previous.length; oldIndex += 1) {
-      const oldLine = previous[oldIndex]
-      if (!oldLine) {
-        continue
-      }
-
-      if (
-        oldLine.charStart === nextLine.charStart &&
-        oldLine.charEnd === nextLine.charEnd &&
-        oldLine.height === nextLine.height
-      ) {
-        stableOldIndex = oldIndex
-        stableNewIndex = newIndex
-        searchFrom = oldIndex
-        break
-      }
-
-      if (oldLine.charStart > nextLine.charStart) {
-        break
-      }
-    }
-
-    if (stableOldIndex >= 0) {
+  while (tokenStart < tokens.length) {
+    const result = breakLine(tokens, prefixSums, state.layoutWidth, tokenStart, lineIndex, y, defaultHeight, constraintForLine)
+    if (!result) {
       break
     }
+
+    relaid.push(result.line)
+
+    const oldLine = previous[lineIndex]
+    if (oldLine && canReuseTail(result.line, oldLine, charDelta)) {
+      const tokenDelta = result.line.tokenStart - oldLine.tokenStart
+      const tail = shiftedTailWithDelta(previous, lineIndex + 1, result.line.y - oldLine.y, lineIndex + 1, charDelta, tokenDelta)
+      return head.concat(relaid, tail)
+    }
+
+    tokenStart = result.nextTokenStart
+    lineIndex += 1
+    y = result.line.y + result.line.height
   }
 
-  if (stableOldIndex < 0 || stableNewIndex < 0) {
-    return head.concat(relaid)
-  }
-
-  const rebuilt = relaid.slice(0, stableNewIndex + 1)
-  const newStable = rebuilt[rebuilt.length - 1]
-  const oldStable = previous[stableOldIndex]
-  if (!newStable || !oldStable) {
-    return head.concat(relaid)
-  }
-
-  const deltaY = (newStable.y + newStable.height) - (oldStable.y + oldStable.height)
-  const tail = shiftedTail(previous, stableOldIndex + 1, deltaY, firstLineIndex + rebuilt.length)
-  return head.concat(rebuilt, tail)
+  return head.concat(relaid)
 }
 
 export function runLayout(doc: InternalTextDocument): LayoutState {
@@ -257,12 +277,114 @@ export function runLayout(doc: InternalTextDocument): LayoutState {
   return nextState
 }
 
-function findRunById(doc: InternalTextDocument, runId: string) {
-  return doc._state.runs.find((run) => run.id === runId) ?? null
-}
-
 function measureWithinStyle(text: string, style: RunStyle, doc: InternalTextDocument): number {
   return measureTextFragment(text, style, doc._state.measureContext)
+}
+
+function findBoundaryIndex(run: MutableRun, localIndex: number, edge: 'start' | 'end'): number {
+  const boundaries = run.metrics?.boundaries ?? []
+  let lo = 0
+  let hi = boundaries.length
+
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if ((boundaries[mid]?.[edge] ?? 0) < localIndex) {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+
+  return lo
+}
+
+function measureRunDistance(doc: InternalTextDocument, run: MutableRun, localStart: number, localEnd: number): number {
+  if (localEnd <= localStart) {
+    return 0
+  }
+
+  const metrics = run.metrics
+  if (!metrics) {
+    return measureWithinStyle(run.text.slice(localStart, localEnd), run.style, doc)
+  }
+
+  const startIndex = findBoundaryIndex(run, localStart, 'start')
+  const endIndex = findBoundaryIndex(run, localEnd, 'end')
+  const endBoundary = metrics.boundaries[endIndex]
+  const fullWidth = (metrics.prefixSums[endIndex] ?? 0) - (metrics.prefixSums[startIndex] ?? 0)
+
+  if (!endBoundary || localEnd <= endBoundary.start) {
+    return fullWidth
+  }
+
+  if (localEnd >= endBoundary.end) {
+    return fullWidth + (metrics.segmentWidths[endIndex] ?? 0)
+  }
+
+  return fullWidth + measureWithinStyle(run.text.slice(endBoundary.start, localEnd), run.style, doc)
+}
+
+function charOffsetForWidth(doc: InternalTextDocument, run: MutableRun, localStart: number, localEnd: number, width: number): number {
+  const clampedWidth = Math.max(0, width)
+  if (clampedWidth <= 0 || localEnd <= localStart) {
+    return localStart
+  }
+
+  const metrics = run.metrics
+  if (!metrics) {
+    let lo = localStart
+    let hi = localEnd
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (measureWithinStyle(run.text.slice(localStart, mid + 1), run.style, doc) < clampedWidth) {
+        lo = mid + 1
+      } else {
+        hi = mid
+      }
+    }
+
+    return lo
+  }
+
+  const startIndex = findBoundaryIndex(run, localStart, 'start')
+  const endIndex = findBoundaryIndex(run, localEnd, 'start')
+  const base = metrics.prefixSums[startIndex] ?? 0
+  let lo = startIndex
+  let hi = endIndex
+
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    const current = (metrics.prefixSums[mid + 1] ?? base) - base
+    if (current < clampedWidth) {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+
+  const boundary = metrics.boundaries[lo]
+  if (!boundary) {
+    return localEnd
+  }
+
+  const widthBefore = (metrics.prefixSums[lo] ?? base) - base
+  if (clampedWidth <= widthBefore) {
+    return boundary.start
+  }
+
+  let charLo = Math.max(localStart, boundary.start)
+  let charHi = Math.min(localEnd, boundary.end)
+  while (charLo < charHi) {
+    const mid = (charLo + charHi) >>> 1
+    const current = widthBefore + measureWithinStyle(run.text.slice(boundary.start, mid + 1), run.style, doc)
+    if (current < clampedWidth) {
+      charLo = mid + 1
+    } else {
+      charHi = mid
+    }
+  }
+
+  return charLo
 }
 
 export function charToPosition(doc: InternalTextDocument, charIndex: number): CharPosition {
@@ -286,20 +408,22 @@ export function charToPosition(doc: InternalTextDocument, charIndex: number): Ch
   }
 
   for (const span of line.runSpans) {
-    if (index < span.charStart) {
+    const start = spanStart(line, span)
+    const end = spanEnd(line, span)
+    if (index < start) {
       return { x: span.x, y: line.y, lineIndex, baseline: line.baseline }
     }
 
-    if (index >= span.charStart && index <= span.charEnd) {
-      const run = findRunById(doc, span.runId)
+    if (index >= start && index <= end) {
+      const run = doc._state.runLookup.get(span.runId)
       if (!run) {
         return { x: span.x, y: line.y, lineIndex, baseline: line.baseline }
       }
 
-      const localStart = Math.max(0, span.charStart - run.globalStart)
+      const localStart = Math.max(0, start - run.globalStart)
       const localIndex = Math.max(localStart, index - run.globalStart)
       return {
-        x: span.x + measureWithinStyle(run.text.slice(localStart, localIndex), run.style, doc),
+        x: span.x + measureRunDistance(doc, run, localStart, localIndex),
         y: line.y,
         lineIndex,
         baseline: line.baseline
@@ -334,26 +458,22 @@ export function positionToChar(doc: InternalTextDocument, x: number, y: number):
   }
 
   for (const span of line.runSpans) {
+    const start = spanStart(line, span)
+    const end = spanEnd(line, span)
     if (x < span.x) {
-      return span.charStart
+      return start
     }
 
     if (x <= span.x + span.width) {
-      const run = findRunById(doc, span.runId)
+      const run = doc._state.runLookup.get(span.runId)
       if (!run) {
-        return span.charStart
+        return start
       }
 
-      const localStart = Math.max(0, span.charStart - run.globalStart)
-      const localEnd = Math.max(localStart, span.charEnd - run.globalStart)
-      for (let cursor = localStart; cursor <= localEnd; cursor += 1) {
-        const width = measureWithinStyle(run.text.slice(localStart, cursor), run.style, doc)
-        if (span.x + width >= x) {
-          return run.globalStart + cursor
-        }
-      }
-
-      return span.charEnd
+      const localStart = Math.max(0, start - run.globalStart)
+      const localEnd = Math.max(localStart, end - run.globalStart)
+      const localOffset = charOffsetForWidth(doc, run, localStart, localEnd, x - span.x)
+      return Math.min(end, run.globalStart + localOffset)
     }
   }
 
@@ -361,6 +481,23 @@ export function positionToChar(doc: InternalTextDocument, x: number, y: number):
 }
 
 export function getLineAt(doc: InternalTextDocument, index: number): LayoutLine {
-  return doc._state.layoutState.lines[clamp(index, 0, Math.max(0, doc._state.layoutState.lines.length - 1))]
+  const line = doc._state.layoutState.lines[clamp(index, 0, Math.max(0, doc._state.layoutState.lines.length - 1))]
     ?? EMPTY_LAYOUT.lines[0]!
+  if (!line || line.charShift === 0) {
+    return line
+  }
+
+  const shifted = cloneLine(line)
+  shifted.charShift = 0
+  shifted.runSpans.forEach((span) => {
+    span.charStart += line.charShift
+    span.charEnd += line.charShift
+  })
+  shifted.segments.forEach((segment) => {
+    segment.runSpans.forEach((span) => {
+      span.charStart += line.charShift
+      span.charEnd += line.charShift
+    })
+  })
+  return shifted
 }

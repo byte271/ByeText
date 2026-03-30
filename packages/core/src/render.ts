@@ -1,4 +1,5 @@
 import { fontString } from './types.ts'
+import { resolveTextDirection } from './unicode.ts'
 import type {
   CanvasContextLike,
   CanvasLike,
@@ -13,6 +14,7 @@ class NullCanvasContext implements CanvasContextLike {
   canvas = { width: 0, height: 0 }
   font = ''
   fillStyle = '#111111'
+  direction: 'inherit' | 'ltr' | 'rtl' = 'ltr'
   globalAlpha = 1
 
   measureText(text: string) {
@@ -102,7 +104,7 @@ export function mergeDirtyRegions(regions: DirtyRegion[]): DirtyRegion[] {
 }
 
 function spansEqual(a: LayoutLine, b: LayoutLine): boolean {
-  if (a.runSpans.length !== b.runSpans.length || a.segments.length !== b.segments.length) {
+  if (a.signature !== b.signature || a.runSpans.length !== b.runSpans.length || a.segments.length !== b.segments.length) {
     return false
   }
 
@@ -110,9 +112,6 @@ function spansEqual(a: LayoutLine, b: LayoutLine): boolean {
     const left = a.runSpans[index]
     const right = b.runSpans[index]
     if (
-      left?.runId !== right?.runId ||
-      left?.charStart !== right?.charStart ||
-      left?.charEnd !== right?.charEnd ||
       left?.x !== right?.x ||
       left?.width !== right?.width
     ) {
@@ -126,9 +125,7 @@ function spansEqual(a: LayoutLine, b: LayoutLine): boolean {
     if (
       left?.xOffset !== right?.xOffset ||
       left?.maxWidth !== right?.maxWidth ||
-      left?.width !== right?.width ||
-      left?.tokenStart !== right?.tokenStart ||
-      left?.tokenEnd !== right?.tokenEnd
+      left?.width !== right?.width
     ) {
       return false
     }
@@ -147,8 +144,6 @@ export function buildDirtyRegionsForLines(previous: LayoutLine[], next: LayoutLi
     if (
       before &&
       after &&
-      before.charStart === after.charStart &&
-      before.charEnd === after.charEnd &&
       before.y === after.y &&
       before.height === after.height &&
       before.width === after.width &&
@@ -179,27 +174,69 @@ export function buildDirtyRegionsForLines(previous: LayoutLine[], next: LayoutLi
   return mergeDirtyRegions(regions)
 }
 
-function visibleLines(lines: LayoutLine[], scrollY: number, viewportHeight: number): LayoutLine[] {
+function visibleLineRange(lines: LayoutLine[], yPrefix: Float64Array, scrollY: number, viewportHeight: number): [number, number] {
+  if (lines.length === 0) {
+    return [-1, -1]
+  }
+
   const maxY = scrollY + viewportHeight
-  return lines.filter((line) => line.y + line.height >= scrollY && line.y <= maxY)
+  let start = lines.length
+  let lo = 0
+  let hi = lines.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1
+    const end = yPrefix[mid + 1] ?? 0
+    if (end >= scrollY) {
+      start = mid
+      hi = mid - 1
+    } else {
+      lo = mid + 1
+    }
+  }
+
+  if (start >= lines.length) {
+    return [-1, -1]
+  }
+
+  let end = -1
+  lo = start
+  hi = lines.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1
+    const lineY = yPrefix[mid] ?? 0
+    if (lineY <= maxY) {
+      end = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+
+  return end >= start ? [start, end] : [-1, -1]
 }
 
 function drawLine(doc: InternalTextDocument, ctx: CanvasContextLike, line: LayoutLine): void {
-  const runs = doc._state.runs
   let activeFont = ''
   let activeColor = ''
+  let activeDirection = ctx.direction ?? 'ltr'
+  const charShift = line.charShift ?? 0
 
   for (const span of line.runSpans) {
-    const run = runs.find((candidate) => candidate.id === span.runId)
+    const run = doc._state.runLookup.get(span.runId)
     if (!run) {
       continue
     }
 
-    const localStart = Math.max(0, span.charStart - run.globalStart)
-    const localEnd = Math.max(localStart, span.charEnd - run.globalStart)
+    const localStart = Math.max(0, span.charStart + charShift - run.globalStart)
+    const localEnd = Math.max(localStart, span.charEnd + charShift - run.globalStart)
     const text = run.text.slice(localStart, localEnd)
     const nextFont = fontString(run.style)
     const nextColor = run.style.color ?? '#111111'
+    const nextDirection = run.style.direction === 'rtl'
+      ? 'rtl'
+      : run.style.direction === 'auto'
+        ? resolveTextDirection(text, activeDirection)
+        : 'ltr'
 
     if (nextFont !== activeFont) {
       ctx.font = nextFont
@@ -211,16 +248,32 @@ function drawLine(doc: InternalTextDocument, ctx: CanvasContextLike, line: Layou
       activeColor = nextColor
     }
 
+    if (ctx.direction !== undefined && nextDirection !== activeDirection) {
+      ctx.direction = nextDirection
+      activeDirection = nextDirection
+    }
+
     ctx.fillText(text, span.x, Math.round(line.y) + line.baseline)
   }
 }
 
 function drawRegion(doc: InternalTextDocument, ctx: CanvasContextLike, region: DirtyRegion): void {
-  const lines = visibleLines(doc._state.layoutState.lines, doc._state.viewport.scrollY, doc._state.viewport.height)
-    .filter((line) => line.y + line.height >= region.y && line.y <= region.y + region.height)
+  const [start, end] = visibleLineRange(
+    doc._state.layoutState.lines,
+    doc._state.layoutState.posToChar.lineYPrefix,
+    Math.max(doc._state.viewport.scrollY, region.y),
+    Math.min(doc._state.viewport.height, region.height)
+  )
+  if (start < 0 || end < start) {
+    return
+  }
 
-  for (const line of lines) {
-    drawLine(doc, ctx, line)
+  const lines = doc._state.layoutState.lines
+  for (let index = start; index <= end; index += 1) {
+    const line = lines[index]
+    if (line && line.y + line.height >= region.y && line.y <= region.y + region.height) {
+      drawLine(doc, ctx, line)
+    }
   }
 }
 

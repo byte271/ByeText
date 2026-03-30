@@ -1,3 +1,1 @@
-export function segmentGraphemes(text: string): string[] {
-  return Array.from(text)
-}
+export { segmentGraphemes } from '../../../core/src/unicode.ts'

@@ -118,7 +118,7 @@ function cacheKey(style: RunStyle, text: string): string {
 }
 
 function segmentWidth(ctx: CanvasContextLike, text: string, style: RunStyle, kind: 'word' | 'space' | 'punct' | 'newline' | 'glyph'): number {
-  if (kind === 'newline') {
+  if (kind === 'newline' || text === '\u200B' || text === '\u00AD') {
     return 0
   }
 

@@ -25,4 +25,19 @@ export function runIncrementalTests(): void {
   doc.layout()
 
   assert.equal(doc.getLine(0).charStart, 0)
+
+  const localCanvas = createMockCanvas(160, 240)
+  const localDoc = ByeText.create({
+    canvas: localCanvas,
+    width: 60,
+    height: 240,
+    font: { family: 'Mock Sans', size: 10 },
+    text: 'aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa'
+  }) as typeof doc & { _state: { dirtyRegions: Array<{ height: number }> } }
+
+  localDoc.insert(0, 'Z ')
+  localDoc.layout()
+
+  assert.equal(localDoc._state.dirtyRegions.length, 1)
+  assert.ok((localDoc._state.dirtyRegions[0]?.height ?? 0) <= 56)
 }

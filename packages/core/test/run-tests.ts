@@ -4,6 +4,7 @@ import { runIncrementalTests } from './incremental.test.ts'
 import { runLayoutTests } from './layout.test.ts'
 import { runMeasureEvictionTests, runMeasureTests } from './measure.test.ts'
 import { runRenderTests } from './render.test.ts'
+import { runUnicodeTests } from './unicode.test.ts'
 
 const tests: Array<{ name: string; run: () => void }> = [
   { name: 'measure/cache', run: runMeasureTests },
@@ -13,7 +14,8 @@ const tests: Array<{ name: string; run: () => void }> = [
   { name: 'flow/split-gap', run: runFlowTests },
   { name: 'layout/queries', run: runLayoutTests },
   { name: 'render/basic', run: runRenderTests },
-  { name: 'incremental/edit', run: runIncrementalTests }
+  { name: 'incremental/edit', run: runIncrementalTests },
+  { name: 'unicode/compat', run: runUnicodeTests }
 ]
 
 let failures = 0

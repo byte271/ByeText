@@ -21,6 +21,7 @@ What to try:
 
 - move the mouse across the article and watch the text split around the ball on both sides
 - drag the curved corner handle to resize the article
+- press `1` through `6` to switch between the different article stress cases
 - keep moving while resizing to test continuous layout and rendering updates
 
 If you want to tweak behavior, edit [demo.js](/D:/ByeText/examples/obstacle/demo.js).

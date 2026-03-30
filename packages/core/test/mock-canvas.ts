@@ -16,6 +16,7 @@ export class MockCanvasContext implements CanvasContextLike {
   canvas = { width: 0, height: 0 }
   font = 'normal 400 16px system-ui'
   fillStyle = '#111111'
+  direction: 'inherit' | 'ltr' | 'rtl' = 'ltr'
   globalAlpha = 1
   readonly drawCalls: MockDrawCall[] = []
   readonly cleared: Array<{ x: number; y: number; width: number; height: number }> = []

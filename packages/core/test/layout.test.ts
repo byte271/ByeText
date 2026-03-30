@@ -22,5 +22,10 @@ export function runLayoutTests(): void {
   assert.equal(position.lineIndex, 1)
 
   const charIndex = doc.positionToChar(position.x + 1, position.y + 1)
-  assert.ok(charIndex >= 6)
+  assert.equal(charIndex, 7)
+
+  doc.setStyle({ weight: 700 }, { start: 6, end: 10 })
+  const styledPosition = doc.charToPosition(8)
+  assert.equal(styledPosition.lineIndex, 1)
+  assert.equal(doc.positionToChar(styledPosition.x + 1, styledPosition.y + 1), 8)
 }

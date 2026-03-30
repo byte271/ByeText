@@ -5,5 +5,9 @@ export const standardBenchScenarios = [
   'width-change',
   'full-layout',
   'render-scroll',
-  'obstacle-move'
+  'obstacle-move',
+  'emoji-edit',
+  'unicode-relayout',
+  'mixed-bidi-layout',
+  'unicode-linebreak-layout'
 ] as const

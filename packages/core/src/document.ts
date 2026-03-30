@@ -45,7 +45,11 @@ function reindexRuns(runs: MutableRun[]): void {
   }
 }
 
-function mergeAdjacentRuns(runs: MutableRun[]): MutableRun[] {
+function buildRunLookup(runs: MutableRun[]): Map<string, MutableRun> {
+  return new Map(runs.map((run) => [run.id, run]))
+}
+
+function normalizeRuns(runs: MutableRun[], compact = false): MutableRun[] {
   const merged: MutableRun[] = []
   for (const run of runs) {
     if (run.text.length === 0) {
@@ -53,12 +57,12 @@ function mergeAdjacentRuns(runs: MutableRun[]): MutableRun[] {
     }
 
     const previous = merged[merged.length - 1]
-    if (previous && styleEquals(previous.style, run.style)) {
+    if (compact && previous && styleEquals(previous.style, run.style)) {
       previous.text += run.text
       previous.metrics = null
       previous.styleVersion += 1
     } else {
-      merged.push({ ...run, metrics: null })
+      merged.push(run)
     }
   }
 
@@ -87,14 +91,32 @@ function findRunIndexAt(runs: MutableRun[], charIndex: number): { index: number;
 
   const total = totalTextLength(runs)
   const target = clamp(charIndex, 0, total)
-  for (let index = 0; index < runs.length; index += 1) {
-    const run = runs[index]
-    if (run && target <= run.globalEnd) {
-      return { index, offset: target - run.globalStart }
+  let lo = 0
+  let hi = runs.length - 1
+
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1
+    const run = runs[mid]
+    if (!run) {
+      break
     }
+
+    if (target < run.globalStart) {
+      hi = mid - 1
+      continue
+    }
+
+    if (target > run.globalEnd || (target === run.globalEnd && mid < runs.length - 1)) {
+      lo = mid + 1
+      continue
+    }
+
+    return { index: mid, offset: clamp(target - run.globalStart, 0, run.text.length) }
   }
 
-  return { index: runs.length - 1, offset: runs[runs.length - 1]?.text.length ?? 0 }
+  const index = clamp(lo, 0, runs.length - 1)
+  const run = runs[index]
+  return { index, offset: clamp(target - (run?.globalStart ?? 0), 0, run?.text.length ?? 0) }
 }
 
 function styleAt(doc: InternalTextDocument, charIndex: number): RunStyle {
@@ -106,19 +128,19 @@ function styleAt(doc: InternalTextDocument, charIndex: number): RunStyle {
   return doc._state.runs[index]?.style ?? doc._state.defaultStyle
 }
 
-function replaceRuns(doc: InternalTextDocument, runs: MutableRun[]): void {
-  doc._state.runs = mergeAdjacentRuns(runs)
-  reindexRuns(doc._state.runs)
+function replaceRuns(doc: InternalTextDocument, runs: MutableRun[], compact = false): void {
+  doc._state.runs = normalizeRuns(runs, compact)
+  doc._state.runLookup = buildRunLookup(doc._state.runs)
 }
 
 function setTextInternal(doc: InternalTextDocument, text: string): void {
-  replaceRuns(doc, text.length > 0 ? [createRun(text, doc._state.defaultStyle)] : [])
+  replaceRuns(doc, text.length > 0 ? [createRun(text, doc._state.defaultStyle)] : [], true)
   markDirty(doc, 0, Math.max(0, text.length), 'insert')
 }
 
 function splitRun(run: MutableRun, offset: number): MutableRun[] {
   if (offset <= 0 || offset >= run.text.length) {
-    return [{ ...run, metrics: null }]
+    return [run]
   }
 
   const start = createRun(run.text.slice(0, offset), run.style)
@@ -135,7 +157,7 @@ function setStyleInternal(doc: InternalTextDocument, style: Partial<RunStyle>, r
 
   for (const run of doc._state.runs) {
     if (run.globalEnd <= start || run.globalStart >= end) {
-      nextRuns.push({ ...run, metrics: null })
+      nextRuns.push(run)
       continue
     }
 
@@ -191,15 +213,21 @@ function insertInternal(doc: InternalTextDocument, charIndex: number, text: stri
     }
 
     if (runIndex !== location.index) {
-      nextRuns.push({ ...run, metrics: null })
+      nextRuns.push(run)
       continue
     }
 
     const offset = location.offset
     if (styleEquals(run.style, insertStyle)) {
-      const updated = createRun(run.text.slice(0, offset) + text + run.text.slice(offset), run.style)
-      updated.styleVersion = run.styleVersion + 1
-      nextRuns.push(updated)
+      if (offset <= 0) {
+        nextRuns.push(createRun(text, run.style), run)
+      } else if (offset >= run.text.length) {
+        nextRuns.push(run, createRun(text, run.style))
+      } else {
+        const updated = createRun(run.text.slice(0, offset) + text + run.text.slice(offset), run.style)
+        updated.styleVersion = run.styleVersion + 1
+        nextRuns.push(updated)
+      }
     } else {
       const parts = splitRun(run, offset)
       if (parts[0]) {
@@ -228,7 +256,7 @@ function deleteInternal(doc: InternalTextDocument, charStart: number, charEnd: n
   const nextRuns: MutableRun[] = []
   for (const run of doc._state.runs) {
     if (run.globalEnd <= start || run.globalStart >= end) {
-      nextRuns.push({ ...run, metrics: null })
+      nextRuns.push(run)
       continue
     }
 
@@ -249,6 +277,12 @@ function deleteInternal(doc: InternalTextDocument, charStart: number, charEnd: n
   doc._state.plugins.emitEdit({ type: 'delete', range: { start, end } })
 }
 
+function ensureLayout(doc: InternalTextDocument): void {
+  if (doc._state.dirtyRange) {
+    runLayout(doc)
+  }
+}
+
 export function createDocument(options: CreateOptions): TextDocument {
   const renderContext = createRenderContext(options.canvas)
   const measureContext = createMeasureContext(options.canvas)
@@ -261,6 +295,7 @@ export function createDocument(options: CreateOptions): TextDocument {
   const doc: InternalTextDocument = {
     _state: {
       runs: [],
+      runLookup: new Map(),
       lineCache: { lines: [], prefixSums: new Float64Array(0), version: 0, dirtyFrom: 0 },
       measureCache: createMeasureCache(512),
       dirtyRange: null,
@@ -292,6 +327,7 @@ export function createDocument(options: CreateOptions): TextDocument {
       }
       doc._state.pluginInstances.clear()
       doc._state.runs = []
+      doc._state.runLookup.clear()
       doc._state.lineCache.lines = []
       doc._state.layoutState = EMPTY_LAYOUT
       doc._state.dirtyRegions = []
@@ -319,24 +355,27 @@ export function createDocument(options: CreateOptions): TextDocument {
       runLayout(doc)
     },
     render(): void {
-      if (doc._state.dirtyRange) {
-        runLayout(doc)
-      }
+      ensureLayout(doc)
       renderDocument(doc)
     },
     getLineCount(): number {
+      ensureLayout(doc)
       return doc._state.layoutState.lineCount
     },
     getTotalHeight(): number {
+      ensureLayout(doc)
       return doc._state.layoutState.totalHeight
     },
     getLine(index: number) {
+      ensureLayout(doc)
       return getLineAt(doc, index)
     },
     charToPosition(charIndex: number) {
+      ensureLayout(doc)
       return layoutCharToPosition(doc, charIndex)
     },
     positionToChar(x: number, y: number) {
+      ensureLayout(doc)
       return layoutPositionToChar(doc, x, y)
     },
     getRunAt(charIndex: number): Run {

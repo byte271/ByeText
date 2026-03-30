@@ -1,20 +1,79 @@
 import { ByeText } from '/packages/core/src/api.ts'
 import { createFlowPlugin } from '/packages/plugins/flow/src/index.ts'
 
-const title = 'An Article About Making Space'
-const standfirst = 'A page feels most alive when it can yield without surrendering its voice.'
-const text = [title, standfirst, ...[
-  'When a dark sphere drifts across a field of language, it should not bully every sentence toward a single margin. A better page negotiates. It keeps the line intact where it can, then opens a measured pocket of air, letting one phrase settle to the left and another remain visible on the right.',
-  'That small act of courtesy changes the feeling of the whole composition. The article stops behaving like a rigid column and starts acting like a surface with awareness. Form is no longer a fixed promise made in advance; it becomes a decision made in the presence of motion.',
-  'This is the kind of restraint I want from a text runtime. It should move cleanly, preserve rhythm, and make room with precision rather than spectacle. Even while the obstacle glides through the center, the prose should keep its balance, as if it had expected interruption all along.'
-]].join('\n\n')
-
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 const dpr = () => Math.max(1, window.devicePixelRatio || 1)
+const baseW = () => Math.min(window.innerWidth - 40, 860)
+const baseH = () => Math.min(window.innerHeight - 40, 720)
+const compose = ({ title, standfirst, body }) => [title, standfirst, ...body].join('\n\n')
+const tests = [
+  {
+    name: 'Latin flow',
+    title: 'An Article About Making Space',
+    standfirst: 'A page feels most alive when it can yield without surrendering its voice.',
+    body: [
+      'When a dark sphere drifts across a field of language, it should not bully every sentence toward a single margin. A better page negotiates. It keeps the line intact where it can, then opens a measured pocket of air, letting one phrase settle to the left and another remain visible on the right.',
+      'That small act of courtesy changes the feeling of the whole composition. The article stops behaving like a rigid column and starts acting like a surface with awareness. Form is no longer a fixed promise made in advance; it becomes a decision made in the presence of motion.',
+      'This is the kind of restraint I want from a text runtime. It should move cleanly, preserve rhythm, and make room with precision rather than spectacle. Even while the obstacle glides through the center, the prose should keep its balance, as if it had expected interruption all along.'
+    ]
+  },
+  {
+    name: 'Dense latin',
+    title: 'Stress Testing a Dense Column',
+    standfirst: 'Compact prose is useful because tiny propagation mistakes become visible almost immediately.',
+    body: [
+      'A narrow measure, a faster cursor, and a little more verbal density create a better stress case than a theatrical layout ever could. If the system hesitates, the rhythm of the column gives it away.',
+      'What matters here is not decoration but discipline. Each small edit should disturb the current line, maybe a neighbor or two, and then stop. A runtime that keeps scanning long after the page has stabilized is wasting attention.',
+      'The ideal result feels unremarkable in the best sense. The text remains composed, the moving obstacle feels local, and the page reads as though its flexibility had been planned from the first sentence.'
+    ]
+  },
+  {
+    name: 'Unicode breaks',
+    title: 'Unicode Break Behavior',
+    standfirst: 'CJK text, soft break opportunities, and non-breaking pairs should remain calm under pressure.',
+    body: [
+      '漢字かな交じりの文章に English phrases and soft\u200Bbreak hints can share a single surface without turning the line breaker into a blunt instrument. The page should still feel deliberate when scripts change cadence.',
+      'A non-breaking pair such as Hello\u00A0world should keep its promise, while a zero-width break should open a graceful exit only where it was invited. Those are small rules, but together they decide whether the layout feels literate.',
+      'When the ball crosses the center of this article, the split should still look authored rather than accidental: one fragment left, another right, and enough white space in the middle to make the interruption readable.'
+    ]
+  },
+  {
+    name: 'Emoji clusters',
+    title: 'Emoji as Intentional Units',
+    standfirst: 'Joined emoji should behave like complete ideas, not as pieces that happen to sit beside one another.',
+    body: [
+      'A family glyph like 👨‍👩‍👧‍👦, a launch like 👨🏽‍🚀, or a flag like 🇺🇸 should survive layout pressure as a single decision. Once those clusters start splintering, the interface stops feeling careful.',
+      'The point is not novelty. Emoji simply expose the same rule as typography: if a unit carries meaning as one piece, the engine should preserve it as one piece while it measures, wraps, and redraws.',
+      'That makes this article useful as a test. The motion is playful, but the requirement is serious: joined symbols should remain whole even while the page is actively making room around the moving obstacle.'
+    ]
+  },
+  {
+    name: 'Mixed bidi',
+    title: 'Mixed Direction Text',
+    standfirst: 'A resilient line should stay legible when English, العربية, and שלום occupy the same thought.',
+    body: [
+      'Direction changes are easy to fake until punctuation and numbers begin to mingle. An honest test mixes scripts inside the same sentence and asks the renderer to stay composed while meaning moves in more than one direction.',
+      'In a line such as English meets العربية beside שלום and then returns to English 2026, the transition should feel measured rather than improvised. Readers notice uncertainty immediately, even when they cannot name it.',
+      'The moving ball makes that challenge visible. If the flow still looks balanced with bidirectional text on both sides of the gap, the runtime is starting to earn trust.'
+    ]
+  },
+  {
+    name: 'Narrow relayout',
+    title: 'Relayout Under Pressure',
+    standfirst: 'A tighter column exaggerates instability, which makes it a useful place to verify the engine stays composed.',
+    width: 560,
+    body: [
+      'Shrinking the available width is a blunt but valuable test because it forces the engine to reveal how much work it truly needs to do. A disciplined incremental layout should adapt quickly rather than panic and start over.',
+      'That is why this mode begins with a narrower article. It turns tiny changes into visible reflow pressure, then asks the page to keep moving without losing rhythm, spacing, or clarity.',
+      'If the runtime can remain smooth here, it is much more likely to behave well in ordinary layouts where the constraints are looser and the user is less forgiving of sudden jumps.'
+    ]
+  }
+]
 
 export function initDemo() {
   const $ = (id) => document.getElementById(id)
   const paper = $('paper')
+  const hud = $('hud')
   const content = $('content')
   const textCanvas = $('text-layer')
   const overlayCanvas = $('overlay-layer')
@@ -22,9 +81,11 @@ export function initDemo() {
   const overlay = overlayCanvas.getContext('2d')
   const rect = () => content.getBoundingClientRect()
   const flow = createFlowPlugin()
+  let active = 0
+  const article = () => compose(tests[active])
   const doc = ByeText.create({
     canvas: textCanvas,
-    text,
+    text: article(),
     width: 640,
     height: 540,
     font: {
@@ -34,21 +95,15 @@ export function initDemo() {
     plugins: [flow]
   })
 
-  doc.setStyle({ size: 40, weight: 700, lineHeight: 46, color: '#111111' }, { start: 0, end: title.length })
-  doc.setStyle(
-    { size: 18, style: 'italic', lineHeight: 30, color: '#5d5d57' },
-    { start: title.length + 2, end: title.length + 2 + standfirst.length }
-  )
-
   const state = {
     minW: 420,
     minH: 420,
     maxW: 1180,
     maxH: 860,
-    w: Math.min(window.innerWidth - 40, 860),
-    h: Math.min(window.innerHeight - 40, 720),
-    tw: Math.min(window.innerWidth - 40, 860),
-    th: Math.min(window.innerHeight - 40, 720),
+    w: baseW(),
+    h: baseH(),
+    tw: baseW(),
+    th: baseH(),
     cw: 0,
     ch: 0,
     ratio: 0,
@@ -58,6 +113,38 @@ export function initDemo() {
 
   const ball = { r: 28, p: 18, x: 0, y: 0, tx: 0, ty: 0, hx: 0, hy: 0 }
   let obstacle = null
+
+  const applyArticleStyles = () => {
+    const { title, standfirst } = tests[active]
+    doc.setStyle({ size: 40, weight: 700, lineHeight: 46, color: '#111111' }, { start: 0, end: title.length })
+    doc.setStyle(
+      { size: 18, style: 'italic', lineHeight: 30, color: '#5d5d57' },
+      { start: title.length + 2, end: title.length + 2 + standfirst.length }
+    )
+  }
+
+  const updateHud = () => {
+    hud.innerHTML = `
+      <strong>Test ${active + 1}: ${tests[active].name}</strong>
+      <span>Press 1-6 to switch scenarios.</span>
+      <div class="hud-keys">${tests.map((test, index) => `<kbd class="${index === active ? 'active' : ''}">${index + 1}</kbd>`).join('')}</div>
+    `
+  }
+
+  const applyTest = (index) => {
+    const next = tests[index]
+    if (!next) {
+      return
+    }
+
+    active = index
+    doc.setText(article())
+    applyArticleStyles()
+    state.tw = clamp(next.width ?? baseW(), state.minW, Math.min(state.maxW, window.innerWidth - 20))
+    state.th = clamp(next.height ?? baseH(), state.minH, Math.min(state.maxH, window.innerHeight - 20))
+    updateHud()
+    doc.render()
+  }
 
   const setPaper = () => {
     paper.style.width = `${state.w}px`
@@ -174,6 +261,15 @@ export function initDemo() {
     state.th = clamp(state.th, state.minH, Math.min(state.maxH, window.innerHeight - 20))
   })
 
+  window.addEventListener('keydown', (event) => {
+    const index = Number(event.key) - 1
+    if (index >= 0 && index < tests.length) {
+      applyTest(index)
+    }
+  })
+
+  applyArticleStyles()
+  updateHud()
   setPaper()
   syncSize(true)
   syncObstacle()
